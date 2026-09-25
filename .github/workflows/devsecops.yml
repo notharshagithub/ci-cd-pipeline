@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
@@ -104,6 +105,7 @@ jobs:
       - test
       - sast
       - sca
+
     runs-on: ubuntu-latest
 
     steps:
@@ -124,6 +126,7 @@ jobs:
     name: Image Scan - Trivy
     needs:
       - docker-build
+
     runs-on: ubuntu-latest
 
     steps:
@@ -137,12 +140,17 @@ jobs:
 
       - name: Install Trivy
         run: |
-          sudo apt-get install -y wget
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+
           wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
             | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+
           echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+
+          sudo apt-get update
+          sudo apt-get install -y trivy
 
       - name: Scan image
         run: |
@@ -151,35 +159,44 @@ jobs:
 
   # ========================================
   # STEP 6 — Push image to Docker Hub
+  #          (only runs on push to main)
   # ========================================
-push:
-  name: Push Image to Docker Hub
-  needs:
-    - image-scan
-  runs-on: ubuntu-latest
 
-  steps:
+  push:
+    name: Push Image to Docker Hub
 
-    - name: Checkout code
-      uses: actions/checkout@v4
+    needs:
+      - image-scan
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: notharsha
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    runs-on: ubuntu-latest
 
-    - name: Build and tag image
-      run: |
-        docker build \
-          -t notharsha/python-web:${{ github.sha }} \
-          -t notharsha/python-web:latest \
-          .
+    # Only push images on actual pushes to main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
-    - name: Push image
-      run: |
-        docker push notharsha/python-web:${{ github.sha }}
-        docker push notharsha/python-web:latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: notharsha
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and tag image
+        run: |
+          docker build \
+            -t notharsha/python-web:${{ github.sha }} \
+            -t notharsha/python-web:latest \
+            .
+
+      - name: Push image
+        run: |
+          docker push notharsha/python-web:${{ github.sha }}
+          docker push notharsha/python-web:latest
+
+
   # ========================================
   # STEP 7 — Deploy to Kubernetes
   #          (only runs on push to main)
@@ -187,24 +204,25 @@ push:
 
   deploy:
     name: Deploy to Kubernetes
+
     needs:
       - push
+
     runs-on: ubuntu-latest
 
-    # Skip this step on pull requests — only deploy real merges to main
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Skip on pull requests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
 
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create k8s Kind Cluster (For testing deployment)
+      - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1.10.0
 
       - name: Update deployment with new image tag
         run: |
-          # Replace '__IMAGE_TAG__' placeholder with the specific git sha we just pushed
           sed -i "s|__IMAGE_TAG__|${{ github.sha }}|g" k8s/deployment.yaml
 
       - name: Deploy to Kubernetes
@@ -216,14 +234,14 @@ push:
         run: |
           kubectl rollout status deployment/session17-python --timeout=60s
 
-      - name: Test running website in CI (Curl)
+      - name: Test running website in CI
         run: |
-          # Forward the service port to the GitHub runner in the background
           kubectl port-forward service/session17-python 5001:80 &
+
           sleep 3
-          
+
           echo "🌐 Fetching the website HTML..."
           curl -s http://localhost:5001 | head -n 15
-          
+
           echo -e "\n\n🌐 Fetching the API status..."
           curl -s http://localhost:5001/api/status
